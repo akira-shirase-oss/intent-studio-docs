@@ -1,0 +1,83 @@
+---
+title: Concepts
+description: Tenants, facts, briefs, page trees, leads and the content store — the model everything in Intent Studio hangs on.
+---
+
+Intent Studio's model is small and every part of it answers a question a page must be able to answer.
+These examples show `https://studio.example.com`, a reserved example domain — your server answers the
+same calls at its own address.
+
+## Tenant
+
+One client. All of a client's facts, briefs, assets, sites and leads hang off their tenant, and no
+route ever crosses tenants: `{tenant}` in a path is checked for shape, then for existence.
+
+```http not-run="shown against the reserved example origin; the quick start runs the same call"
+POST /v1/operator/tenants
+{"name": "acme-plumbing"}
+```
+
+## Fact
+
+A claim the business stands behind, with its source and its kind: testimonial, metric, price,
+guarantee, licence, certification, insurance, service area, opening hours, contact details, or a
+legal promise. A fact has a lifecycle the API enforces:
+
+- `proposed` — recorded, not usable. Nothing may cite it.
+- `approved` — a person approved it (`approved_by`, `approved_on`); it also gets a `review_by` day.
+- `stale` — the review day passed. Stale is terminal for citing: the fact must be re-approved or
+  withdrawn.
+- `withdrawn` — retired deliberately.
+
+The lifecycle is the honesty mechanism: a page can only assert what an approved, current fact
+supports, and the server — not the author — says which facts qualify today.
+
+## Brief
+
+What the client's site is for, and the budget of truth it may spend. A brief carries the business
+name, its goal (today, `quote_requests`: qualified quote requests through the site's form), the
+intent and audience in the client's words, the services offered, the brand notes, the domains the
+site may link to, the references to build from — and `claims`, the fact ids pages of this site may
+use. Briefs are revisioned: a `PUT` must name the `expected_revision` it builds on, and a stale
+expectation is a `409`, not a lost update.
+
+## Page tree and spec-check
+
+A page is never free HTML. It is a **page tree**: components of the `quote-request@0` vocabulary —
+hero, services, testimonials, trust items, service area, hours, contact, the quote form, text, the
+footer — each with typed slots. Text may be plain (no claim allowed) or bound to fact ids that
+support it.
+
+`POST …/briefs/{brief}/spec-check` validates a tree without storing anything: every claim slot
+references an approved, current fact the brief lists; every link is structural (an in-page anchor,
+a page of the tree, a contact fact's link, or an `https` address on one of the brief's domains);
+free text passes a claim lint; a home page carries the quote form offering only the brief's
+services. Problems come back by path, all of them at once — never one at a time.
+
+## Asset and the content store
+
+Uploaded files (photos, the logo) and fetched reference pages live outside PostgreSQL in a
+content-addressed store: the bytes' SHA-256 is their name, so what you read back is provably what
+was written. PostgreSQL records the asset's id, kind, content hash and provenance; the store only
+holds bytes. A reference fetch is never a raw `curl` — it goes through an egress guard that refuses
+private addresses and caps size and time.
+
+## Lead and outbox
+
+A published site's contact form posts to `POST /v1/sites/{site}/leads` — the only public write, and
+the only route that needs no session. The lead and its notification outbox row **commit in the same
+transaction**: the acknowledgment (`status: "stored"`) means both are durably recorded. A notifier
+that is down loses nothing — the outbox retries on a schedule — and a resubmission with the same
+`submission_id` returns the stored lead rather than a second copy.
+
+## The operator session
+
+One operator, one password (its argon2 hash is configured, never the password). Sign-in returns an
+`HttpOnly`, `SameSite=Strict` cookie; every workspace call carries it. The workspace app is served
+by the same origin, so there is no CORS and no token in storage.
+
+## PostgreSQL is the authority
+
+Every record — tenants, facts, briefs, revisions, sessions, assets' metadata, sites, leads, the
+outbox, the audit trail — lives in PostgreSQL. Nothing else is authoritative: not the content
+store (bytes only), not memory, not a file. If it isn't committed, it didn't happen.

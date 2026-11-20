@@ -1,0 +1,44 @@
+---
+title: Intent Studio
+description: A self-hosted service that turns a client's goal into a working website — facts and a brief in, a checked page out, a lead inbox back.
+---
+
+Intent Studio is a self-hosted Rust service that turns a client's goal into a working website. An
+operator — the agency or freelancer running it — keeps a studio of tenants (their clients), and for
+each tenant the **facts** the business stands behind, the **brief** that says what the site is for,
+and the pages built from them.
+
+It is one process and one PostgreSQL database. PostgreSQL is the authority for every record; a
+content-addressed store holds asset bytes; a workspace app — a Svelte single-page app the server
+serves on its own origin — is how the operator drives it.
+
+## What it does today
+
+- **The workspace** — sign in, manage tenants, record and approve facts, write and revise briefs,
+  upload assets, and read the lead inbox. It runs at `/workspace` on the same origin as the API.
+- **The studio API** — every workspace action is a route you can call too: tenants, facts,
+  briefs, spec-check, assets. [The API reference](/api/reference/) lists them all.
+- **Lead intake** — a published site's contact form posts to `POST /v1/sites/{site}/leads`; the
+  lead and its notification outbox row commit together, and a down notifier loses nothing.
+- **The honesty checks** — a page can only claim what an approved, current fact supports;
+  `spec-check` says so before anything renders.
+
+## Where to start
+
+- [Quick start](/quick-start/) — run the server on this machine and make your first tenant, fact
+  and brief against its real API.
+- [Concepts](/concepts/) — tenants, facts, briefs, page trees, leads: the model everything hangs on.
+- [The workspace](/workspace/) — the operator's app, screen by screen.
+- [Authentication](/authentication/) — the operator password, the session cookie, and what the API
+  accepts.
+- [Self-hosting](/self-hosting/configuration/) — run it for real: configuration, deployment,
+  backups, monitoring and the security model.
+- [API reference](/api/reference/) — every route, generated from the OpenAPI document, with try-it.
+- [Changelog](/changelog/) — what changed, newest first.
+
+:::note[Honesty about the roadmap]
+Intent Studio builds a client's site by rendering checked components against approved facts, and
+publishes only an approved bundle. The studio API and workspace on these pages are what exists and
+is tested today; publishing and the agent loop are still on the roadmap, and the changelog will say
+when each lands.
+:::

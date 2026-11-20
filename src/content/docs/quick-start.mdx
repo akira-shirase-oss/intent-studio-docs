@@ -1,0 +1,231 @@
+---
+title: Quick start
+description: Run Intent Studio on this machine, sign in, and make a tenant, an approved fact, a brief and a passing spec-check against its real API.
+---
+
+This page runs Intent Studio on **this machine** — every example below executes in CI exactly as
+shown, against `http://127.0.0.1:59400`, the server's own default address. It ends with a signed-in
+session, a tenant, an approved fact, a brief, and a page tree that passes `spec-check`.
+
+You'll need:
+
+- **Docker** — the repo's compose stack provides PostgreSQL (`scripts/stack.sh`). Any PostgreSQL 18
+  you point `INTENT_DATABASE_URL` at works instead.
+- **Rust** — `rustup`; the repo's `rust-toolchain.toml` picks the version.
+- **Node 22.17+** — the workspace app is built with npm.
+- **curl and jq** — the examples are `curl` piped through `jq`.
+
+## 1. Get the code and the database
+
+```sh run=quickstart step=install
+git clone --depth 1 https://github.com/akira-shirase-oss/intent-studio
+cd intent-studio
+scripts/stack.sh up
+cargo build --release --locked -p intent-server
+(cd apps/workspace && npm ci && npm run build)
+```
+
+`stack.sh up` starts PostgreSQL on `127.0.0.1:59432` (user `intent`, dev password `intent-dev`,
+database `intent` — development credentials, in the repo's compose file).
+
+## 2. Configure and run the server
+
+The operator password is never configured in the clear — the server wants its argon2 hash, which
+`intent-server hash-password` produces from a password on standard input:
+
+```sh run=quickstart
+export INTENT_DATABASE_URL="postgres://intent:intent-dev@127.0.0.1:59432/intent"
+export INTENT_BIND="127.0.0.1:59400"
+export INTENT_OPERATOR_PASSWORD_HASH="$(printf '%s\n' 'quickstart-password' | target/release/intent-server hash-password)"
+export INTENT_COOKIE_SECURE=false
+export INTENT_PROFILE=development
+export INTENT_NOTIFY_PROVIDER=recorder
+export INTENT_STORE_DIR="$PWD/var/store"
+export INTENT_WORKSPACE_DIR=apps/workspace/build
+mkdir -p "$INTENT_STORE_DIR"
+target/release/intent-server migrate
+target/release/intent-server serve &>"$INTENT_STORE_DIR/../server.log" &
+for i in $(seq 100); do curl -sf http://127.0.0.1:59400/readyz >/dev/null && break; sleep 0.2; done
+```
+
+The development profile keeps the cookie plain-HTTP (`INTENT_COOKIE_SECURE=false`) and records
+notifications instead of sending them. The workspace app you built is served at `/workspace`.
+
+## 3. Sign in
+
+`POST /v1/operator/session` trades the password for an `HttpOnly`, `SameSite=Strict` session
+cookie. `-c`/`-b` keep it in a jar for the calls after it:
+
+```sh run=quickstart
+curl -s -c jar -X POST http://127.0.0.1:59400/v1/operator/session \
+  -H 'content-type: application/json' \
+  -d '{"password":"quickstart-password"}' | jq .
+```
+
+```json output=quickstart
+{
+  "signed_in": true
+}
+```
+
+Every operator route takes the cookie; `GET /v1/operator/session` answers `{"signed_in":true}` while
+it's live. [Authentication](/authentication/) has the rules — session length, idle expiry, the
+cookie's two names, and the sign-in rate limit.
+
+## 4. Create a tenant and an approved fact
+
+A tenant is one client. `POST /v1/operator/tenants` makes one; the id comes back:
+
+```sh run=quickstart
+curl -s -b jar -X POST http://127.0.0.1:59400/v1/operator/tenants \
+  -H 'content-type: application/json' \
+  -d '{"name":"acme-plumbing"}' | jq '{id, name}'
+```
+
+```json output=quickstart
+{
+  "id": "019b1234-5678-7abc-8def-0123456789ab",
+  "name": "acme-plumbing"
+}
+```
+
+```sh run=quickstart
+TENANT=$(curl -s -b jar http://127.0.0.1:59400/v1/operator/tenants | jq -r '.tenants[0].id')
+```
+
+A **fact** is a claim the business stands behind — a metric, a price, a guarantee, contact details —
+with its source. It starts `proposed`; nothing may cite it until a person approves it:
+
+```sh run=quickstart
+curl -s -b jar -X POST "http://127.0.0.1:59400/v1/operator/tenants/$TENANT/facts" \
+  -H 'content-type: application/json' \
+  -d '{"kind":"metric","statement":"over 500 boilers fitted","source":"job records 2024–2026"}' \
+  | jq '{id, kind, status, statement}'
+```
+
+```json output=quickstart
+{
+  "id": "019b1234-5678-7abc-8def-0123456789ab",
+  "kind": "metric",
+  "status": "proposed",
+  "statement": "over 500 boilers fitted"
+}
+```
+
+```sh run=quickstart
+FACT=$(curl -s -b jar "http://127.0.0.1:59400/v1/operator/tenants/$TENANT/facts" | jq -r '.facts[0].id')
+```
+
+Approval records who on the client's side signed it off and when; every kind of fact gets a review
+date, after which it turns `stale` and can't be cited:
+
+```sh run=quickstart
+curl -s -b jar -X POST "http://127.0.0.1:59400/v1/operator/tenants/$TENANT/facts/$FACT/approval" \
+  -H 'content-type: application/json' \
+  -d '{"approved_by":"Pat Lee, owner","approved_on":"2026-11-19"}' | jq '{status, approved_by}'
+```
+
+```json output=quickstart
+{
+  "status": "approved",
+  "approved_by": "Pat Lee, owner"
+}
+```
+
+## 5. Write the brief and check a page against it
+
+The **brief** says what the site is for: the business, its goal (`quote_requests` is the one goal
+today), the services it offers, and the fact ids it permits pages to claim. `POST …/briefs` stores
+revision 1:
+
+```sh run=quickstart
+curl -s -b jar -X POST "http://127.0.0.1:59400/v1/operator/tenants/$TENANT/briefs" \
+  -H 'content-type: application/json' \
+  -d '{
+    "business_name": "Acme Plumbing",
+    "goal": "quote_requests",
+    "intent": "Win boiler repair and servicing work in Leamington.",
+    "audience": "Homeowners with a boiler problem.",
+    "services": [{"name":"Boiler repair"},{"name":"Annual service"}],
+    "claims": []
+  }' | jq '{id, revision}'
+```
+
+```json output=quickstart
+{
+  "id": "019b1234-5678-7abc-8def-0123456789ab",
+  "revision": 1
+}
+```
+
+```sh run=quickstart
+BRIEF=$(curl -s -b jar "http://127.0.0.1:59400/v1/operator/tenants/$TENANT/briefs" | jq -r '.briefs[0].id')
+```
+
+A page is never free HTML. It's a **page tree** — components of the `quote-request@0` vocabulary
+with typed slots — and `spec-check` validates it against the brief and today's facts. A home page
+must carry the quote form; its `consent_notice` is the privacy-notice version the form shows:
+
+```sh run=quickstart
+curl -s -b jar -X POST "http://127.0.0.1:59400/v1/operator/tenants/$TENANT/briefs/$BRIEF/spec-check" \
+  -H 'content-type: application/json' \
+  -d '{
+    "component_set": "quote-request@0",
+    "pages": [{
+      "path": "/",
+      "title": "Acme Plumbing — boiler repairs in Leamington",
+      "description": "Boiler repair and annual servicing from local engineers.",
+      "sections": [
+        {"component":"hero","heading":"Boiler repairs in Leamington","subheading":"Local engineers, honest quotes."},
+        {"component":"quote_form","consent_notice":"v1"}
+      ]
+    }]
+  }' | jq .
+```
+
+```json output=quickstart
+{
+  "valid": true,
+  "brief_revision": 1,
+  "component_set": "quote-request@0",
+  "lint": "claim-lint v1",
+  "facts_checked": 0
+}
+```
+
+`facts_checked` is 0 because this tree binds no fact slots yet — a page that claims the 500 boilers
+would bind that fact and be refused if it went stale or was never in the brief's `claims`.
+[Concepts](/concepts/) walks the whole model.
+
+## 6. Read the inbox and sign out
+
+Site contact forms post to `POST /v1/sites/{site}/leads` — the only public write. The operator's
+inbox is `GET /v1/operator/leads` (empty here; [leads](/leads/) shows a submission):
+
+```sh run=quickstart
+curl -s -b jar "http://127.0.0.1:59400/v1/operator/leads" | jq '{count: (.leads | length)}'
+```
+
+```json output=quickstart
+{
+  "count": 0
+}
+```
+
+Sign-out is `DELETE /v1/operator/session`: the session row is deleted and the cookie cleared — an
+empty `204`:
+
+```sh run=quickstart
+curl -s -b jar -o /dev/null -w '%{http_code}\n' -X DELETE http://127.0.0.1:59400/v1/operator/session
+```
+
+```text output=quickstart
+204
+```
+
+## What next
+
+- [The workspace](/workspace/) — the same calls, in the app at `/workspace`.
+- [Authentication](/authentication/) — the cookie, the rate limits, the CSRF marker on uploads.
+- [Self-hosting](/self-hosting/configuration/) — every `INTENT_*` variable, systemd and Caddy,
+  backups and monitoring.

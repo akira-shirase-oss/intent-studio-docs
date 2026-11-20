@@ -1,0 +1,42 @@
+---
+title: Monitoring
+description: /healthz, /readyz, /metrics — what each answers, who may call it, and what to alert on.
+---
+
+Three endpoints tell you the truth about a running server. On this machine's pages they show the
+default address, `http://127.0.0.1:59400`.
+
+## Liveness and readiness
+
+| Endpoint | Answers | Caller |
+|---|---|---|
+| `GET /healthz` | The process is up and its event loop answers. | Anything — load balancers, uptime checks. |
+| `GET /readyz` | The server is **ready to work**: the database answers and the store is usable. Behind Caddy, this is what a probe should hit — a `503` means the process lives but can't serve. | Orchestrators, deploy scripts, you. |
+| `GET /metrics` | The counters and gauges — intake, outbox, sessions, limits — in Prometheus exposition. | Scrapers only, and only with `Authorization: Bearer $INTENT_METRICS_TOKEN` when a token is configured. |
+
+`/readyz` failing while `/healthz` answers is the database-down or store-broken shape: the process
+is honest about it rather than accepting requests it can't complete.
+
+## What to alert on
+
+- **`/readyz` down** — the service isn't serving; page-worthy.
+- **Outbox depth growing** — lead notifications are accumulating (a notifier outage or a retry
+  storm); `metrics` carries it.
+- **Dead outbox rows** — attempts exhausted; the notification needs an operator, not more retries.
+- **`429`/`503` rates on intake** — either abuse finding the limit or a capacity line you should
+  raise deliberately.
+- **Session and limit-table growth** — the bounded tables are cleaned on a schedule, and `metrics`
+  shows whether they keep pace.
+
+## Logs
+
+`INTENT_LOG_FORMAT=json` (the default) gives one structured event per line for your collector;
+`INTENT_LOG` filters (`info,sqlx=warn` by default). The server's own rules apply to what can appear
+in a log line: no secrets, no password material, no lead PII, no brief internals — a log leak is a
+bug with a test, not a style choice. If you ever see one, it's a defect to report.
+
+## Proving it
+
+The failure drills in the product repo exercise db-down, kill -9, notify-down and limit behaviour
+against the real stack; a green `/readyz` after restart is the operator-facing proof of the same
+contract.

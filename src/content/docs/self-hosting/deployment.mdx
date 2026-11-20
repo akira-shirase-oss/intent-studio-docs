@@ -1,0 +1,105 @@
+---
+title: Deployment
+description: Run Intent Studio for real — the binary pair, systemd, Caddy, and the deploy script shape.
+---
+
+One host, one process pair, one PostgreSQL. The layout the workspace rules assume: the Rust server
+behind Caddy on the product's droplet, PostgreSQL where you keep it (Neon with `sslmode=verify-full`
+or your own), TLS terminating at Caddy. The server binds loopback — never expose it directly.
+
+## Build
+
+```sh not-run="a build step — CI builds the binaries; running it here needs the checkout"
+cargo build --release --locked -p intent-server -p intent-worker
+(cd apps/workspace && npm ci && npm run build)
+```
+
+Three artifacts ship: `intent-server`, `intent-worker` (the render/asset worker — the server spawns
+it with no credentials and no network beyond its job), and `apps/workspace/build` (the static app
+the server serves).
+
+## The environment file
+
+Secrets live on the host in a `0600` environment file — never in the unit, the journal, or `ps`:
+
+```sh not-run="shape — fill the four values on the host"
+INTENT_PROFILE=production
+INTENT_BIND=127.0.0.1:59400
+INTENT_DATABASE_URL=postgres://intent:<password>@<host>:5432/intent?sslmode=verify-full
+INTENT_OPERATOR_PASSWORD_HASH=<argon2 hash from intent-server hash-password>
+INTENT_NOTIFY_PROVIDER=webhook
+INTENT_NOTIFY_WEBHOOK_URL=<your notifier endpoint>
+INTENT_STORE_DIR=/var/lib/intent-studio/store
+INTENT_WORKSPACE_DIR=/var/lib/intent-studio/workspace
+INTENT_WORKER_BIN=/usr/local/bin/intent-worker
+INTENT_COOKIE_SECURE=true
+INTENT_METRICS_TOKEN=<16+ chars, if you scrape /metrics>
+```
+
+`check-config` validates all of it before you restart anything:
+
+```sh not-run="runs on the host, needs no live server"
+env $(grep -v '^#' /var/lib/intent-studio/env | xargs) intent-server check-config
+```
+
+## systemd
+
+```text not-run="a systemd unit — it runs under systemd, not in the docs' harness"
+[Unit]
+Description=Intent Studio
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/var/lib/intent-studio/env
+ExecStart=/usr/local/bin/intent-server serve
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+# The workspace is a single-operator service; keep it tight.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/intent-studio/store
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The server drains gracefully on SIGTERM (`INTENT_DRAIN_DELAY_MS`, `INTENT_SHUTDOWN_GRACE_MS`) —
+`systemctl stop` is a clean shutdown, not a kill.
+
+## Caddy
+
+```text not-run="a Caddyfile shape — the server binds loopback behind it"
+studio.example.com {
+	reverse_proxy 127.0.0.1:59400
+}
+```
+
+One origin for the API and the workspace — no CORS, and the `__Host-` cookie's `Secure` requirement
+is met by Caddy's TLS. If the proxy terminates TLS, set `INTENT_TRUSTED_PROXIES` to the proxy's
+addresses so rate limiting sees real client IPs.
+
+## The deploy, scripted
+
+`snippets/deploy.sh` in this repository is the same sequence as one script:
+
+```sh not-run="it deploys to a host you name — nothing in the docs' harness can reach one"
+HOST=deploy@203.0.113.10 bash snippets/deploy.sh
+```
+
+It copies the binaries and the built app, creates the environment file only if absent, restarts
+under the host's supervisor, and probes `/readyz` — the restart is not done until readiness answers.
+
+## Migrations
+
+`intent-server migrate` applies migrations against `INTENT_DATABASE_URL` and is safe to re-run —
+run it before the new binary serves, as part of the same deploy:
+
+```sh not-run="runs on the host against the live database"
+intent-server migrate
+```

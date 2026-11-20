@@ -1,0 +1,64 @@
+---
+title: The security model
+description: What Intent Studio trusts, what it never trusts, and the shape of the answer when something is refused.
+---
+
+This page says what the security model **is** — the mechanisms and their limits — not that the
+system is "secure". Where a control exists it is named; where there is a hole, it says so.
+
+## What is trusted
+
+- **PostgreSQL** — the only authority. Every record lives there; anything not committed didn't
+  happen.
+- **The content store** — bytes named by their SHA-256. A read re-hashes: bytes that don't match
+  their name are `corrupt`, never served. One store at a time opens a root — a second opener is
+  refused, so a live store's in-flight writes can't be swept from under it.
+- **The operator session** — a random token in an `HttpOnly`, `SameSite=Strict` cookie; the database
+  holds only its SHA-256 digest.
+
+## What is never trusted
+
+- **Model output** (when the agent loop lands): bounded iterations, wall time, tokens and budget;
+  output that fails validation is a named refusal, not a retry-forever.
+- **Imported pages and uploaded assets**: content, not instructions — sanitized and
+  provenance-recorded.
+- **Client-named URLs**: a reference fetch goes through the egress guard only — private addresses
+  are refused, size and time are capped. Nothing else fetches on a client's say-so.
+- **The render/asset worker**: spawned with no credentials and no network beyond its own job; its
+  deadline is enforced.
+- **A request body**: bounded before it is read; parse errors are never echoed back (they can quote
+  the input).
+
+## The refusal is the contract
+
+Intent Studio's answer to something it doesn't like is a typed refusal, not a best effort:
+
+- `401` — no live session (and the workspace treats it as "signed out", not "retry").
+- `403`/`404` — a session for one tenant never sees another's rows; an unknown site takes no lead.
+- `409` — a brief revision conflict, or a `submission_id` reused for a different lead.
+- `422` — a validation problem list, every problem by path.
+- `429` with `retry-after` — a per-site or per-address limit was hit.
+- `503` — the server is shedding load, or a configured-off subsystem (an unset store) was asked for.
+
+None of these retry inside the server pretending to succeed; the client gets the real answer.
+
+## Secrets
+
+- `INTENT_OPERATOR_PASSWORD_HASH` stores a hash; the password exists only at hash time and sign-in.
+- `INTENT_DATABASE_URL` and `INTENT_METRICS_TOKEN` are configuration secrets — masked in the config
+  summary, never in logs (a log leak is a defect the product's own tests hunt).
+- Session tokens are digested at rest; deploy tokens (publishing, when it lands) are decrypted only
+  inside the publish path.
+- In the environment file, secrets are `0600` on the host — never flags on a command line, which
+  `ps` and the journal would keep.
+
+## The honest limits
+
+- Rate limiting uses the client address — set `INTENT_TRUSTED_PROXIES` correctly or the proxy's
+  address is what's limited.
+- `INTENT_COOKIE_SECURE=false` exists for local development only; production must serve HTTPS and
+  keep it `true`, or the `__Host-` guarantee doesn't apply.
+- TLS ends at the proxy (Caddy); the server speaks HTTP on loopback — exposing its bind address
+  directly bypasses the cookie's `Secure` intent and any proxy-side controls.
+- The docs' own claim is bounded the same way: every example here either runs in CI or says why it
+  can't — nothing on these pages is asserted untested.

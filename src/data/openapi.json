@@ -1,0 +1,519 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Intent Studio",
+    "version": "0.1.0-draft",
+    "description": "Intent Studio's HTTP API: the operator session, tenants, facts, briefs, spec-check, assets, lead intake, and health. A draft authored in the docs repository and kept in sync with the server's route table by CI."
+  },
+  "servers": [
+    { "url": "https://studio.example.com", "description": "Your Intent Studio (an example domain)" },
+    { "url": "http://127.0.0.1:59400", "description": "The quick start on this machine" }
+  ],
+  "tags": [
+    { "name": "health", "description": "Liveness, readiness and metrics." },
+    { "name": "intake", "description": "The public lead endpoint — the only route needing no session." },
+    { "name": "operator", "description": "The operator session and the lead inbox." },
+    { "name": "studio", "description": "Tenants, facts, briefs, spec-check and assets." }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": ["health"],
+        "operationId": "healthz",
+        "summary": "Liveness — the process answers.",
+        "responses": { "200": { "description": "Alive.", "content": { "text/plain": { "schema": { "type": "string" } } } } }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": ["health"],
+        "operationId": "readyz",
+        "summary": "Readiness — the database answers and the store is usable.",
+        "responses": {
+          "200": { "description": "Ready to serve." },
+          "503": { "description": "Process alive but cannot serve (database down or store unusable)." }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": ["health"],
+        "operationId": "metrics",
+        "summary": "Prometheus exposition — counters and gauges.",
+        "security": [{ "metricsToken": [] }],
+        "responses": {
+          "200": { "description": "Metrics text.", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "401": { "description": "A metrics token is configured and the request didn't carry it." }
+        }
+      }
+    },
+    "/v1/sites/{site}/leads": {
+      "post": {
+        "tags": ["intake"],
+        "operationId": "submitLead",
+        "summary": "Submit a lead — the site's contact form. The only public write.",
+        "parameters": [{ "name": "site", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" }, "description": "The site's id." }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/LeadSubmission" },
+              "example": { "name": "Jo Briggs", "email": "jo@example.com", "phone": "+44 7700 900123", "message": "Boiler leaking — can someone come today?", "consent": true, "consent_notice": "v1", "submission_id": "a3f9c2d1-8b4e-4f6a-9c2d-5e7f8a9b0c1d" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "A resubmission of an already stored lead (duplicate: true).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Acknowledgment" } } } },
+          "201": { "description": "Stored — the lead and its outbox row committed together.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Acknowledgment" } } } },
+          "404": { "description": "Unknown site.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Refusal" } } } },
+          "409": { "description": "The submission_id was already used for a different body.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Refusal" } } } },
+          "422": { "description": "Validation problems, by field.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problems" } } } },
+          "429": { "description": "A per-site or per-address limit; retry after the given seconds.", "headers": { "retry-after": { "schema": { "type": "integer" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Refusal" } } } },
+          "503": { "description": "The server is shedding load; resubmit with the same submission_id." }
+        }
+      }
+    },
+    "/v1/operator/session": {
+      "post": {
+        "tags": ["operator"],
+        "operationId": "signIn",
+        "summary": "Sign in — the password for a session cookie.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "required": ["password"], "properties": { "password": { "type": "string" } }, "additionalProperties": false }, "example": { "password": "choose-a-long-password" } } }
+        },
+        "responses": {
+          "200": { "description": "Signed in; the session cookie is set.", "headers": { "set-cookie": { "schema": { "type": "string" }, "description": "__Host-intent_operator=<token>; HttpOnly; SameSite=Strict; Path=/; Max-Age=<ttl>; Secure" } }, "content": { "application/json": { "schema": { "type": "object", "properties": { "signed_in": { "type": "boolean" } } } } } },
+          "401": { "description": "Wrong password, or sign-in is not configured." },
+          "429": { "description": "Sign-in rate limit for this address.", "headers": { "retry-after": { "schema": { "type": "integer" } } } }
+        }
+      },
+      "get": {
+        "tags": ["operator"],
+        "operationId": "session",
+        "summary": "Whether the carried session is live.",
+        "security": [{ "operatorSession": [] }],
+        "responses": {
+          "200": { "description": "Live session.", "content": { "application/json": { "schema": { "type": "object", "properties": { "signed_in": { "type": "boolean" } } } } } },
+          "401": { "description": "No live session." }
+        }
+      },
+      "delete": {
+        "tags": ["operator"],
+        "operationId": "signOut",
+        "summary": "Sign out — delete the session row and clear the cookie.",
+        "security": [{ "operatorSession": [] }],
+        "responses": { "204": { "description": "Signed out; the cookie is cleared." } }
+      }
+    },
+    "/v1/operator/leads": {
+      "get": {
+        "tags": ["operator"],
+        "operationId": "inbox",
+        "summary": "The lead inbox — newest first, paged by `before`.",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [
+          { "name": "site", "in": "query", "schema": { "type": "string", "format": "uuid" }, "description": "Filter to one site." },
+          { "name": "before", "in": "query", "schema": { "type": "string", "format": "uuid" }, "description": "Cursor: leads before this id." },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } }
+        ],
+        "responses": {
+          "200": { "description": "The page of leads.", "content": { "application/json": { "schema": { "type": "object", "properties": { "leads": { "type": "array", "items": { "$ref": "#/components/schemas/InboxLead" } }, "next_before": { "type": ["string", "null"], "format": "uuid" } } } } } },
+          "401": { "description": "No live session." }
+        }
+      }
+    },
+    "/v1/operator/tenants": {
+      "get": {
+        "tags": ["studio"],
+        "operationId": "tenants",
+        "summary": "List tenants.",
+        "security": [{ "operatorSession": [] }],
+        "responses": {
+          "200": { "description": "The tenants.", "content": { "application/json": { "schema": { "type": "object", "properties": { "tenants": { "type": "array", "items": { "$ref": "#/components/schemas/Tenant" } } } } } } },
+          "401": { "description": "No live session." }
+        }
+      },
+      "post": {
+        "tags": ["studio"],
+        "operationId": "createTenant",
+        "summary": "Create a tenant.",
+        "security": [{ "operatorSession": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } }, "additionalProperties": false }, "example": { "name": "acme-plumbing" } } } },
+        "responses": {
+          "201": { "description": "Created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Tenant" } } } },
+          "401": { "description": "No live session." },
+          "422": { "description": "Validation problems.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problems" } } } }
+        }
+      }
+    },
+    "/v1/operator/tenants/{tenant}/facts": {
+      "get": {
+        "tags": ["studio"],
+        "operationId": "facts",
+        "summary": "List a tenant's facts.",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }],
+        "responses": {
+          "200": { "description": "The facts, with `today` for reading statuses and `truncated` at the list cap.", "content": { "application/json": { "schema": { "type": "object", "properties": { "today": { "type": "string", "format": "date" }, "facts": { "type": "array", "items": { "$ref": "#/components/schemas/Fact" } }, "truncated": { "type": "boolean" } } } } } },
+          "401": { "description": "No live session." },
+          "404": { "description": "Unknown tenant." }
+        }
+      },
+      "post": {
+        "tags": ["studio"],
+        "operationId": "createFact",
+        "summary": "Record a fact (status proposed — unusable until approved).",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FactForm" }, "example": { "kind": "metric", "statement": "over 500 boilers fitted", "source": "job records 2024–2026" } } } },
+        "responses": {
+          "201": { "description": "Created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Fact" } } } },
+          "401": { "description": "No live session." },
+          "422": { "description": "Validation problems.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problems" } } } }
+        }
+      }
+    },
+    "/v1/operator/tenants/{tenant}/facts/{fact}/approval": {
+      "post": {
+        "tags": ["studio"],
+        "operationId": "approveFact",
+        "summary": "Approve a fact — records who approved it and when; sets the review-by day.",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }, { "$ref": "#/components/parameters/Fact" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApprovalForm" }, "example": { "approved_by": "Pat Lee, owner", "approved_on": "2026-11-19" } } } },
+        "responses": {
+          "200": { "description": "Approved.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Fact" } } } },
+          "401": { "description": "No live session." },
+          "404": { "description": "Unknown tenant or fact." },
+          "422": { "description": "Validation problems (e.g. a withdrawn fact, a bad date).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problems" } } } }
+        }
+      }
+    },
+    "/v1/operator/tenants/{tenant}/facts/{fact}/withdrawal": {
+      "post": {
+        "tags": ["studio"],
+        "operationId": "withdrawFact",
+        "summary": "Withdraw a fact — it can never be cited again.",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }, { "$ref": "#/components/parameters/Fact" }],
+        "responses": {
+          "200": { "description": "Withdrawn.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Fact" } } } },
+          "401": { "description": "No live session." },
+          "404": { "description": "Unknown tenant or fact." }
+        }
+      }
+    },
+    "/v1/operator/tenants/{tenant}/briefs": {
+      "get": {
+        "tags": ["studio"],
+        "operationId": "briefs",
+        "summary": "List a tenant's briefs.",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }],
+        "responses": {
+          "200": { "description": "The briefs.", "content": { "application/json": { "schema": { "type": "object", "properties": { "briefs": { "type": "array", "items": { "$ref": "#/components/schemas/BriefSummary" } } } } } } },
+          "401": { "description": "No live session." },
+          "404": { "description": "Unknown tenant." }
+        }
+      },
+      "post": {
+        "tags": ["studio"],
+        "operationId": "createBrief",
+        "summary": "Create a brief — revision 1.",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BriefForm" } } } },
+        "responses": {
+          "201": { "description": "Created.", "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "revision": { "type": "integer" } } } } } },
+          "401": { "description": "No live session." },
+          "422": { "description": "Validation problems.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problems" } } } }
+        }
+      }
+    },
+    "/v1/operator/tenants/{tenant}/briefs/{brief}": {
+      "get": {
+        "tags": ["studio"],
+        "operationId": "brief",
+        "summary": "Read a brief (the newest revision, or `?revision=n`).",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }, { "$ref": "#/components/parameters/Brief" }, { "name": "revision", "in": "query", "schema": { "type": "integer" } }],
+        "responses": {
+          "200": { "description": "The brief.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Brief" } } } },
+          "401": { "description": "No live session." },
+          "404": { "description": "Unknown tenant or brief." }
+        }
+      },
+      "put": {
+        "tags": ["studio"],
+        "operationId": "reviseBrief",
+        "summary": "Revise a brief — optimistic concurrency on expected_revision.",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }, { "$ref": "#/components/parameters/Brief" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["expected_revision", "brief"], "properties": { "expected_revision": { "type": "integer" }, "brief": { "$ref": "#/components/schemas/BriefForm" } }, "additionalProperties": false } } } },
+        "responses": {
+          "200": { "description": "Saved.", "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "revision": { "type": "integer" } } } } } },
+          "401": { "description": "No live session." },
+          "404": { "description": "Unknown tenant or brief." },
+          "409": { "description": "Someone saved first — the answer carries `latest_revision`.", "content": { "application/json": { "schema": { "type": "object", "properties": { "code": { "type": "string" }, "latest_revision": { "type": "integer" } } } } } },
+          "422": { "description": "Validation problems.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problems" } } } }
+        }
+      }
+    },
+    "/v1/operator/tenants/{tenant}/briefs/{brief}/spec-check": {
+      "post": {
+        "tags": ["studio"],
+        "operationId": "specCheck",
+        "summary": "Validate a page tree against the brief and today's facts — stores nothing.",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }, { "$ref": "#/components/parameters/Brief" }, { "name": "revision", "in": "query", "schema": { "type": "integer" }, "description": "Check against this revision (default: newest)." }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PageTree" } } } },
+        "responses": {
+          "200": { "description": "Valid.", "content": { "application/json": { "schema": { "type": "object", "properties": { "valid": { "type": "boolean" }, "brief_revision": { "type": "integer" }, "component_set": { "type": "string" }, "lint": { "type": "string" }, "facts_checked": { "type": "integer" } } } } } },
+          "401": { "description": "No live session." },
+          "404": { "description": "Unknown tenant or brief." },
+          "422": { "description": "Every problem, by path.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problems" } } } }
+        }
+      }
+    },
+    "/v1/operator/tenants/{tenant}/assets": {
+      "get": {
+        "tags": ["studio"],
+        "operationId": "assets",
+        "summary": "List a tenant's assets.",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }],
+        "responses": {
+          "200": { "description": "The assets.", "content": { "application/json": { "schema": { "type": "object", "properties": { "assets": { "type": "array", "items": { "$ref": "#/components/schemas/Asset" } } } } } } },
+          "401": { "description": "No live session." }
+        }
+      },
+      "post": {
+        "tags": ["studio"],
+        "operationId": "uploadAsset",
+        "summary": "Upload bytes — raw body, `x-intent-upload` marker required, stored content-addressed.",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }, { "name": "x-intent-upload", "in": "header", "required": true, "schema": { "type": "string" }, "description": "The CSRF marker — any nonempty value." }],
+        "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+        "responses": {
+          "201": { "description": "Stored.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Asset" } } } },
+          "401": { "description": "No live session." },
+          "422": { "description": "Missing marker, unsupported type, or over the size cap.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problems" } } } },
+          "503": { "description": "No store configured (INTENT_STORE_DIR unset)." }
+        }
+      }
+    },
+    "/v1/operator/tenants/{tenant}/assets/{asset}/content": {
+      "get": {
+        "tags": ["studio"],
+        "operationId": "assetContent",
+        "summary": "Read an asset's bytes (re-hashed on read — corrupt never serves).",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }, { "$ref": "#/components/parameters/Asset" }],
+        "responses": {
+          "200": { "description": "The bytes.", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+          "401": { "description": "No live session." },
+          "404": { "description": "Unknown tenant or asset." },
+          "503": { "description": "No store configured." }
+        }
+      }
+    },
+    "/v1/operator/tenants/{tenant}/briefs/{brief}/snapshots": {
+      "get": {
+        "tags": ["studio"],
+        "operationId": "snapshots",
+        "summary": "List reference snapshots fetched for a brief.",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }, { "$ref": "#/components/parameters/Brief" }],
+        "responses": {
+          "200": { "description": "The snapshots.", "content": { "application/json": { "schema": { "type": "object", "properties": { "snapshots": { "type": "array", "items": { "$ref": "#/components/schemas/Asset" } } } } } } },
+          "401": { "description": "No live session." },
+          "404": { "description": "Unknown tenant or brief." }
+        }
+      },
+      "post": {
+        "tags": ["studio"],
+        "operationId": "fetchSnapshot",
+        "summary": "Fetch a reference page through the egress guard into the store.",
+        "security": [{ "operatorSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Tenant" }, { "$ref": "#/components/parameters/Brief" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["url"], "properties": { "url": { "type": "string", "format": "uri" } }, "additionalProperties": false } } } },
+        "responses": {
+          "201": { "description": "Fetched and stored.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Asset" } } } },
+          "401": { "description": "No live session." },
+          "422": { "description": "A refused URL — private address, disallowed scheme, or over the caps." },
+          "503": { "description": "No store configured." }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "operatorSession": { "type": "apiKey", "in": "cookie", "name": "__Host-intent_operator", "description": "The session cookie set by POST /v1/operator/session (named intent_operator on plain-HTTP development servers)." },
+      "metricsToken": { "type": "http", "scheme": "bearer", "description": "INTENT_METRICS_TOKEN, for GET /metrics when configured." }
+    },
+    "parameters": {
+      "Tenant": { "name": "tenant", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" }, "description": "The tenant's id." },
+      "Fact": { "name": "fact", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" }, "description": "The fact's id." },
+      "Brief": { "name": "brief", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" }, "description": "The brief's id." },
+      "Asset": { "name": "asset", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" }, "description": "The asset's id." }
+    },
+    "schemas": {
+      "Tenant": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "name": { "type": "string" }, "created_at": { "type": "string", "format": "date-time" } } },
+      "Fact": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "tenant_id": { "type": "string", "format": "uuid" },
+          "kind": { "type": "string", "enum": ["testimonial", "metric", "price", "guarantee", "licence", "certification", "insurance", "service_area", "opening_hours", "contact_details", "legal_promise"] },
+          "statement": { "type": "string" },
+          "source": { "type": "string" },
+          "link": { "type": ["object", "null"], "properties": { "kind": { "type": "string", "enum": ["tel", "mailto", "url"] }, "value": { "type": "string" }, "href": { "type": "string" } } },
+          "status": { "type": "string", "enum": ["proposed", "approved", "stale", "withdrawn"], "description": "Computed for `today` — a stale fact can't be cited." },
+          "approved_by": { "type": ["string", "null"] },
+          "approved_on": { "type": ["string", "null"], "format": "date" },
+          "review_by": { "type": ["string", "null"], "format": "date" },
+          "review_days": { "type": "integer" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "approval_recorded_at": { "type": ["string", "null"], "format": "date-time" },
+          "withdrawn_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "FactForm": {
+        "type": "object",
+        "required": ["kind", "statement", "source"],
+        "properties": {
+          "kind": { "type": "string" },
+          "statement": { "type": "string" },
+          "source": { "type": "string" },
+          "link": { "type": "object", "properties": { "kind": { "type": "string" }, "value": { "type": "string" } }, "additionalProperties": false }
+        },
+        "additionalProperties": false
+      },
+      "ApprovalForm": {
+        "type": "object",
+        "properties": {
+          "approved_by": { "type": "string", "description": "Who approved it on the client's side." },
+          "approved_on": { "type": "string", "format": "date" },
+          "review_by": { "type": "string", "format": "date", "description": "Earlier than the kind's default, if given." }
+        },
+        "additionalProperties": false
+      },
+      "BriefSummary": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" }, "business_name": { "type": "string" }, "latest_revision": { "type": "integer" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" } } },
+      "Brief": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "tenant_id": { "type": "string", "format": "uuid" },
+          "revision": { "type": "integer" },
+          "latest_revision": { "type": "integer" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "revised_at": { "type": "string", "format": "date-time" },
+          "brief": { "$ref": "#/components/schemas/BriefForm" }
+        }
+      },
+      "BriefForm": {
+        "type": "object",
+        "required": ["business_name", "goal", "intent", "audience", "services", "claims"],
+        "properties": {
+          "business_name": { "type": "string" },
+          "goal": { "type": "string", "enum": ["quote_requests"] },
+          "intent": { "type": "string" },
+          "audience": { "type": "string" },
+          "services": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" }, "description": { "type": "string" } }, "additionalProperties": false } },
+          "brand": { "type": "object", "properties": { "tone": { "type": "string" }, "colors": { "type": "array", "items": { "type": "string", "pattern": "^#[0-9a-f]{6}$" } }, "logo": { "type": "string", "format": "uuid" } }, "additionalProperties": false },
+          "domains": { "type": "array", "items": { "type": "string" } },
+          "references": { "type": "array", "items": { "type": "object", "properties": { "url": { "type": "string", "format": "uri" }, "permission": { "type": "string" }, "notes": { "type": "string" } }, "additionalProperties": false } },
+          "claims": { "type": "array", "items": { "type": "string", "format": "uuid" }, "description": "Fact ids a page of this site may assert." }
+        },
+        "additionalProperties": false
+      },
+      "PageTree": {
+        "type": "object",
+        "required": ["component_set", "pages"],
+        "properties": {
+          "component_set": { "type": "string", "enum": ["quote-request@0"] },
+          "pages": {
+            "type": "array", "minItems": 1, "maxItems": 5,
+            "items": {
+              "type": "object",
+              "required": ["path", "title", "description", "sections"],
+              "properties": {
+                "path": { "type": "string", "description": "`/` or `/<lowercase-slug>`; exactly one page is `/`." },
+                "title": { "$ref": "#/components/schemas/Text" },
+                "description": { "$ref": "#/components/schemas/Text" },
+                "sections": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "$ref": "#/components/schemas/Section" } }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "Text": { "description": "A string, or {text, facts} binding the claims it makes to fact ids.", "oneOf": [{ "type": "string" }, { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" }, "facts": { "type": "array", "items": { "type": "string", "format": "uuid" } } }, "additionalProperties": false }] },
+      "FactRef": { "type": "object", "required": ["fact"], "properties": { "fact": { "type": "string", "format": "uuid" } }, "additionalProperties": false },
+      "Action": { "type": "object", "description": "A button or link: {label, to} where `to` is an in-page anchor (#id), a page path, a fact's link, or an https address on a brief domain.", "properties": { "label": { "type": "string" }, "to": { "type": "string" } } },
+      "Section": {
+        "type": "object",
+        "required": ["component"],
+        "description": "One component of quote-request@0. `component` is one of: hero, services, testimonials, trust, service_area, hours, contact, quote_form, text, footer — each with its own slots; the quote_form's consent_notice is required.",
+        "properties": { "component": { "type": "string", "enum": ["hero", "services", "testimonials", "trust", "service_area", "hours", "contact", "quote_form", "text", "footer"] }, "id": { "type": "string" } },
+        "example": { "component": "hero", "heading": "Boiler repairs in Leamington", "subheading": "Local engineers, honest quotes." }
+      },
+      "LeadSubmission": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "email": { "type": "string", "format": "email" },
+          "phone": { "type": "string" },
+          "message": { "type": "string" },
+          "consent": { "type": "boolean" },
+          "consent_notice": { "type": "string", "description": "The privacy-notice version the form showed." },
+          "submission_id": { "type": "string", "description": "The form's own idempotency key — one per form instance." }
+        },
+        "additionalProperties": false
+      },
+      "Acknowledgment": {
+        "type": "object",
+        "properties": {
+          "lead_id": { "type": "string", "format": "uuid" },
+          "submission_id": { "type": "string" },
+          "status": { "type": "string", "enum": ["stored"], "description": "Always `stored` — acknowledged only once committed." },
+          "duplicate": { "type": "boolean" }
+        }
+      },
+      "InboxLead": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "tenant_id": { "type": "string", "format": "uuid" },
+          "site_id": { "type": "string", "format": "uuid" },
+          "site_name": { "type": "string" },
+          "submission_id": { "type": "string" },
+          "name": { "type": ["string", "null"] },
+          "email": { "type": ["string", "null"] },
+          "phone": { "type": ["string", "null"] },
+          "message": { "type": ["string", "null"] },
+          "consent": { "type": ["boolean", "null"] },
+          "consent_notice": { "type": ["string", "null"] },
+          "received_at": { "type": "string", "format": "date-time" },
+          "notified": { "type": "string", "enum": ["pending", "sent", "failed", "dead"], "description": "The outbox's truth about its notification." }
+        }
+      },
+      "Asset": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "tenant_id": { "type": "string", "format": "uuid" },
+          "kind": { "type": "string" },
+          "hash": { "type": "string", "description": "The content's SHA-256 — its name in the store." },
+          "bytes": { "type": "integer" },
+          "content_type": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Refusal": { "type": "object", "properties": { "code": { "type": "string" }, "message": { "type": "string" } } },
+      "Problems": { "type": "object", "properties": { "code": { "type": "string" }, "problems": { "type": "array", "items": { "type": "object", "properties": { "path": { "type": "string" }, "code": { "type": "string" }, "message": { "type": "string" } } } } } }
+    }
+  }
+}

@@ -1,0 +1,87 @@
+---
+title: Configuration
+description: Every INTENT_* variable — what it controls, its default, and which ones refuse to start when wrong.
+---
+
+Intent Studio configures itself from environment variables only — there is no config file. Every
+variable is validated at startup: a bad value fails the process with a named problem rather than
+running half-configured. `intent-server check-config` runs that validation without serving, so a
+deploy can check its environment before swapping anything:
+
+```sh not-run="a local configuration check — it needs no server, only the built binary"
+intent-server check-config
+```
+
+```text not-run="what a healthy configuration prints"
+configuration ok: profile Production, listening on 127.0.0.1:59400, content store on, workspace served
+```
+
+## Required
+
+| Variable | Meaning |
+|---|---|
+| `INTENT_DATABASE_URL` | The PostgreSQL URL — the only authority. Required; missing it is a refusal to start. |
+| `INTENT_OPERATOR_PASSWORD_HASH` | The argon2 hash of the operator password (`intent-server hash-password`). Unset disables sign-in entirely. Its shape is checked at startup. |
+| `INTENT_NOTIFY_PROVIDER` | `webhook` (delivers lead notifications to `INTENT_NOTIFY_WEBHOOK_URL`) or `recorder` (records them; development only — production refuses it). |
+
+## The server
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INTENT_PROFILE` | `production` | `production` or `development`; development allows the recorder notifier. |
+| `INTENT_BIND` | `127.0.0.1:59400` | The listen address. Keep it loopback behind Caddy or a tunnel. |
+| `INTENT_WORKSPACE_DIR` | unset | The built workspace app (`200.html` must exist in it). Unset = API only, no app. |
+| `INTENT_STORE_DIR` | unset | The content-addressed byte store. Unset = uploads answer `503` (explicit, not silent). |
+| `INTENT_WORKER_BIN` | `intent-worker` beside the server | The render/asset worker binary. |
+| `INTENT_WORKER_TIMEOUT_MS` | the render deadline | How long a worker job may take. |
+| `INTENT_WORKER_CONCURRENCY` | the worker pool size | At most 16. |
+
+## Sessions and the cookie
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INTENT_SESSION_TTL_SECS` | `43200` (12 h) | A session's absolute lifetime, 1 min – 7 days. |
+| `INTENT_SESSION_IDLE_SECS` | `1800` (30 min) | Idle expiry, up to 24 h. |
+| `INTENT_COOKIE_SECURE` | `true` | `Secure` + `__Host-` cookie name. **Must stay `true` in production** — `false` is for local HTTP only. |
+
+## Limits (all bounded, all enforced)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INTENT_REQUEST_TIMEOUT_MS` | bounded | Deadline on a whole request. |
+| `INTENT_INTAKE_DEADLINE_MS` | bounded | Deadline inside intake; must stay below the request timeout. |
+| `INTENT_MAX_CONNECTIONS` | `1024` | Concurrent connections. |
+| `INTENT_MAX_CONNECTIONS_PER_ADDRESS` | bounded | Per client address; may not exceed the global cap. |
+| `INTENT_MAX_IN_FLIGHT` | `1024` | Requests being processed at once — the shed line. |
+| `INTENT_LIMIT_SITE_PER_MINUTE` | bounded | Lead submissions per site. |
+| `INTENT_LIMIT_ADDRESS_PER_MINUTE` | bounded | Lead submissions per client address. |
+| `INTENT_TRUSTED_PROXIES` | unset | Proxy IPs whose `Forwarded` header is believed for rate limiting. |
+| `INTENT_METRICS_TOKEN` | unset | Bearer token for `GET /metrics`; ≥16 chars if set. |
+
+## Notifications
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INTENT_NOTIFY_WEBHOOK_URL` | required for `webhook` | Where lead notifications are POSTed. |
+| `INTENT_NOTIFY_ATTEMPT_TIMEOUT_MS` | bounded | One delivery attempt's deadline. |
+| `INTENT_NOTIFY_RETRY_BASE_MS` | bounded | Backoff base between attempts. |
+| `INTENT_NOTIFY_LEASE_MS` | bounded | A claimed outbox row's lease; must exceed the attempt timeout. |
+| `INTENT_NOTIFY_CONCURRENCY` | `32` | In-flight deliveries. |
+| `INTENT_NOTIFY_BATCH` | `64` | Outbox rows per poll. |
+| `INTENT_NOTIFY_POLL_MS` | bounded | How often the outbox is polled. |
+
+## Logging
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INTENT_LOG_FORMAT` | `json` | `json` for machines, `pretty` for a terminal. |
+| `INTENT_LOG` | `info,sqlx=warn` | The tracing filter. |
+
+:::caution[Never log the secrets]
+`INTENT_DATABASE_URL`, `INTENT_OPERATOR_PASSWORD_HASH` and `INTENT_METRICS_TOKEN` are secrets —
+the server treats them as such and never prints them. Give them the same treatment in unit files
+(environment files with `0600`, not `-e` flags that land in the journal and `ps`).
+:::
+
+An example development environment is the quick start's; [deployment](/self-hosting/deployment/)
+shows the production shape.

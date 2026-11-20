@@ -1,0 +1,61 @@
+---
+title: The workspace
+description: The operator's app — signing in, tenants, facts, briefs, assets and the lead inbox, screen by screen.
+---
+
+The workspace is the app an operator drives Intent Studio with: a single-page app the server itself
+serves at `/workspace` on the API's own origin. Same origin means no CORS and no tokens in browser
+storage — the session cookie does everything. Every screen below is a call on
+[the studio API](/api/reference/); nothing in the app can do something the API can't.
+
+Open it at your server's address — `https://studio.example.com/workspace` in these examples.
+
+## Signing in
+
+The sign-in screen takes the operator password — the one whose argon2 hash is in
+`INTENT_OPERATOR_PASSWORD_HASH`. A wrong password is a refusal, and the sign-in endpoint is rate
+limited per address, so guesses cost time. A successful sign-in sets the session cookie and lands
+on the tenant list; the session ends itself after its lifetime or too long idle, and a `401` from
+any call drops the app back to the sign-in screen rather than pretending the call happened.
+
+## Tenants
+
+The home list is the tenants — one per client. Pick one, or create one with a name. Everything after
+is inside that tenant: its facts, briefs, assets, sites and leads.
+
+## Facts
+
+The facts list shows every fact with its kind, statement and status — `proposed`, `approved`,
+`stale`, `withdrawn` — plus its review date where one applies. Creating a fact picks a kind and asks
+for the statement, the source, and an optional link; approving asks who approved it and when (with
+an optional earlier review-by); withdrawing needs no body. A stale fact can't be re-approved without
+a new approval date — the app makes that an action, not an error.
+
+## Briefs
+
+The brief editor is the site-in-waiting: business name, goal, intent and audience, services, brand
+tone and colours, domains, references, and the claims — which of this tenant's approved facts a page
+may assert. Saving a revision carries the revision it was read from; if someone else saved first the
+app surfaces the conflict with the newer revision number rather than overwriting silently.
+
+## Assets
+
+The asset list is a tenant's uploaded files — images, the logo — each recorded with its kind,
+content hash and size. Uploads are sent as raw bytes with the `x-intent-upload` marker (the CSRF
+guard for non-form posts); the server stores them content-addressed and the app shows the metadata
+PostgreSQL holds. A reference page can be fetched as a snapshot through the egress guard — it
+refuses private addresses and caps size and time, and the refusal is the answer, not a retry.
+
+## The inbox
+
+`GET /v1/operator/leads` rendered: the newest lead first, paged by `before`, filterable by site.
+Each lead shows what the submitter gave — name, email, phone, message, consent — plus its
+acknowledgment status. A lead only exists because it and its outbox row committed together, so an
+entry in the inbox means the notification was queued, not just received.
+
+## What the app never does
+
+- It never writes free text to a page — page content is the page tree the API validates.
+- It never bypasses a refusal: a `422` with problems is shown as problems, by field.
+- On a write that didn't answer (a dropped connection, a `503`), it says **it cannot tell whether
+  the change was saved** — never "saved", never "failed". Repeating a safe read answers the truth.

@@ -1,0 +1,48 @@
+---
+title: Backups and restore
+description: What to back up — PostgreSQL and the content store — and the restore drill that proves it works.
+---
+
+Two things hold state: **PostgreSQL** (every record — tenants, facts, briefs, sessions, leads, the
+outbox, asset metadata, the audit trail) and the **content store** (`INTENT_STORE_DIR` — the asset
+bytes, named by their hash). Back up both, together.
+
+## Back up
+
+```sh not-run="runs against your database and store — nothing the docs can reach"
+pg_dump "$INTENT_DATABASE_URL" --format=custom --file=intent-studio-$(date +%F).dump
+rsync -a "$INTENT_STORE_DIR/" "backups/store-$(date +%F)/"
+```
+
+The dump is the authority; the store directory is a plain file tree — `rsync` (or object storage)
+takes it as-is. A store file's name is its SHA-256, so a backup's integrity is self-checking: any
+file that doesn't hash to its name is corrupt and stands out.
+
+The store is crash-safe but not transactional with the dump — a blob written between the dump and
+the rsync has no metadata row pointing at it yet, and on restore it is simply unreferenced bytes the
+next open sweeps. That direction is safe; a row pointing at a missing blob is not, so take the dump
+first and the store second, and keep them labelled as one set.
+
+## Restore
+
+```sh not-run="runs against your database and store"
+createdb intent_restored
+pg_restore --dbname=intent_restored intent-studio-2026-11-20.dump
+rsync -a backups/store-2026-11-20/ /var/lib/intent-studio/store/
+INTENT_DATABASE_URL=postgres://intent:<password>@<host>:5432/intent_restored intent-server migrate
+```
+
+Migrate after restoring so the restored database lands on the current schema.
+
+## The drill that counts
+
+A backup is a claim; the drill is the evidence. On a schedule — and after any change that touches
+the schema, the store layout, or the restore path — restore the latest pair onto scratch, point a
+test `INTENT_DATABASE_URL` and `INTENT_STORE_DIR` at it, run `migrate` and `check-config`, then
+answer `/readyz` and one real read (a tenant's facts). If the restored server can't answer, the
+backup is worth nothing and today is the day to know it — write down what you restored, when, and
+what you probed.
+
+Store dumps off the host (object storage under the workspace's hosting layout) and keep at least a
+daily and a weekly, with lead/PII retention in mind: a backup holds lead personal data with the
+same rules as the live database.

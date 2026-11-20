@@ -1,0 +1,76 @@
+---
+title: Leads
+description: The intake endpoint — what a published site's form posts, the acknowledgment it gets, and why a down notifier loses nothing.
+---
+
+A published site's contact form posts to one route: `POST /v1/sites/{site}/leads`. It is the only
+public write in the API — no session, no cookie — which is why it is also the most defended:
+submission bodies are bounded, the endpoint sheds load rather than queueing it, and per-site and
+per-address limits apply before the body is even read. These examples show
+`https://studio.example.com`, a reserved example domain.
+
+## Submitting
+
+```http not-run="shown against the reserved example origin; the quick start's server accepts the same call"
+POST /v1/sites/019b1234-5678-7abc-8def-0123456789ab/leads
+content-type: application/json
+
+{
+  "name": "Jo Briggs",
+  "email": "jo@example.com",
+  "phone": "+44 7700 900123",
+  "message": "Boiler leaking under the sink — can someone come today?",
+  "consent": true,
+  "consent_notice": "v1",
+  "submission_id": "a3f9c2d1-8b4e-4f6a-9c2d-5e7f8a9b0c1d"
+}
+```
+
+`submission_id` is the form's own idempotency key — generate one per form instance (a hidden field,
+or `crypto.randomUUID()`). `consent` and `consent_notice` record that the form showed its privacy
+notice and which version.
+
+## The acknowledgment means committed
+
+```json not-run="the response shape"
+{
+  "lead_id": "019b5678-9abc-7def-8abc-0123456789cd",
+  "submission_id": "a3f9c2d1-8b4e-4f6a-9c2d-5e7f8a9b0c1d",
+  "status": "stored",
+  "duplicate": false
+}
+```
+
+`status` is always `stored` — the server acknowledges only after the lead **and** its notification
+outbox row commit in the same transaction. There is no "received, will queue" state.
+
+`duplicate: true` answers a resubmission the first attempt already stored — same `submission_id`,
+same site: you get the stored lead's id back with `200`, not a second lead. Retry the submit on any
+uncertain answer (timeout, `503`, `429`) without fear: the worst case is this idempotent replay.
+
+## When the notifier is down
+
+A lead never waits on email or webhook delivery. The outbox row that committed with it is retried
+on a bounded schedule, and attempts are recorded — the operator's inbox shows the truth of each
+lead's notification state. If you operate the server, `INTENT_NOTIFY_PROVIDER` picks the provider
+and `recorder` (development) records instead of sending.
+
+## Reading the inbox
+
+```http not-run="shown against the reserved example origin; an operator call — the session cookie is required"
+GET /v1/operator/leads?limit=50
+```
+
+Newest first, at most 200 per page; `next_before` is the cursor for the page before, and `site`
+filters to one site's leads. Each lead carries what the submitter gave — treat it as PII: it is
+exactly what the form asked the visitor to consent to.
+
+## Refusals you may see
+
+- `404` — the site isn't one this server serves leads for.
+- `409` — the `submission_id` was already used for a **different** body on this site: same key,
+  different lead — a real conflict, not a duplicate.
+- `429` with `retry-after` — the per-site or per-address limit; wait the given seconds, then resend
+  the same `submission_id`.
+- `503` — the server is shedding load; resubmit later with the same key.
+- `422` — a validation problem list, by field.

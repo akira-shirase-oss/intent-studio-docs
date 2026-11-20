@@ -1,0 +1,85 @@
+---
+title: Authentication
+description: The operator password, the session cookie, sign-in rate limits, and the CSRF marker on uploads.
+---
+
+Intent Studio's operator API has no API keys and no bearer tokens. One operator signs in with one
+password and carries one `HttpOnly` session cookie. These examples show `https://studio.example.com`,
+a reserved example domain.
+
+## The password
+
+The server is configured with the password's **argon2 hash**, never the password itself —
+`intent-server hash-password` turns one into the other:
+
+```sh not-run="a local configuration step — it needs no server"
+printf '%s\n' 'choose-a-long-password' | intent-server hash-password
+```
+
+```text not-run="the hash's shape — the real value goes in INTENT_OPERATOR_PASSWORD_HASH"
+$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>
+```
+
+`INTENT_OPERATOR_PASSWORD_HASH` carries that value. Unset, sign-in is disabled outright — the
+server refuses to run an operator surface with no operator.
+
+## Signing in
+
+```http not-run="shown against the reserved example origin; the quick start signs in for real"
+POST /v1/operator/session
+content-type: application/json
+
+{"password": "choose-a-long-password"}
+```
+
+A correct password gets `200 {"signed_in":true}` and a `Set-Cookie`. Wrong gets `401` — and sign-in
+is rate limited **per client address** before the password is even checked, so brute force buys
+waiting time, not guesses.
+
+## The cookie
+
+```text not-run="the Set-Cookie the server sends"
+set-cookie: __Host-intent_operator=<64-hex>; HttpOnly; SameSite=Strict; Path=/; Max-Age=<ttl>; Secure
+```
+
+- The value is a random session token; the database stores only its SHA-256 digest, so a database
+  read can't replay a session.
+- `HttpOnly` — no script can read it. `SameSite=Strict` — no cross-site request carries it.
+  `Path=/` — the whole origin.
+- **`__Host-` prefix** — on HTTPS the cookie is `__Host-intent_operator`, which browsers only
+  accept marked `Secure` with no `Domain`. On a plain-HTTP development server
+  (`INTENT_COOKIE_SECURE=false`) the prefix would make browsers refuse it, so it's the plain name
+  `intent_operator` — which is why production must run with `cookie_secure` on.
+- It has a lifetime (`Max-Age`) **and** an idle limit: a session left unused expires early. Either
+  way the next call gets `401` and the workspace returns to sign-in — it never guesses.
+
+`GET /v1/operator/session` answers `{"signed_in":true}` for a live cookie — the workspace's "am I
+still me" check. `DELETE` removes the session row and clears the cookie.
+
+## The CSRF marker on uploads
+
+JSON posts are already safe under `SameSite=Strict`, but **uploads are raw bytes** — not a form a
+browser would send cross-origin on your behalf — so they carry an explicit marker:
+
+```http not-run="an asset upload; the marker header is what admits it"
+POST /v1/operator/tenants/019b1234-5678-7abc-8def-0123456789ab/assets
+x-intent-upload: 1
+content-type: application/octet-stream
+
+<the file's bytes>
+```
+
+A request without `x-intent-upload` on an upload route is refused before a byte is trusted — a
+webpage can force a browser to POST a body, but it cannot set that header.
+
+## What curl needs
+
+Anything after sign-in carries the cookie — the quick start keeps it in a jar:
+
+```sh not-run="the pattern the quick start uses for real"
+curl -b jar https://studio.example.com/v1/operator/leads
+```
+
+The one caller that isn't the operator is monitoring: `GET /metrics` is protected by its own token
+(`INTENT_METRICS_TOKEN`) when one is configured — a bearer secret for the scraper, kept out of the
+operator surface entirely.
