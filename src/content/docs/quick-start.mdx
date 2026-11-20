@@ -21,12 +21,14 @@ You'll need:
 git clone --depth 1 https://github.com/akira-shirase-oss/intent-studio
 cd intent-studio
 scripts/stack.sh up
-cargo build --release --locked -p intent-server
+cargo build --release --locked -p intent-server -p intent-worker
 (cd apps/workspace && npm ci && npm run build)
 ```
 
 `stack.sh up` starts PostgreSQL on `127.0.0.1:59432` (user `intent`, dev password `intent-dev`,
-database `intent` — development credentials, in the repo's compose file).
+database `intent` — development credentials, in the repo's compose file). The build makes
+`intent-worker` beside `intent-server`: a server configured with a store refuses to start
+without one.
 
 ## 2. Configure and run the server
 
@@ -45,8 +47,14 @@ export INTENT_WORKSPACE_DIR=apps/workspace/build
 mkdir -p "$INTENT_STORE_DIR"
 target/release/intent-server migrate
 target/release/intent-server serve &>"$INTENT_STORE_DIR/../server.log" &
-for i in $(seq 100); do curl -sf http://127.0.0.1:59400/readyz >/dev/null && break; sleep 0.2; done
+for i in $(seq 150); do curl -sf http://127.0.0.1:59400/readyz >/dev/null && break; sleep 0.2; done
+curl -sf http://127.0.0.1:59400/readyz >/dev/null \
+  || { echo "the server never became ready — the log says:" >&2; tail -20 "$INTENT_STORE_DIR/../server.log" >&2; false; }
 ```
+
+The wait is bounded on purpose: `/readyz` gets thirty seconds, and if the server never answers
+the log's last lines print instead of the next command failing mysteriously on a dead port —
+a server that cannot start (a missing worker, a refused configuration) says so there.
 
 The development profile keeps the cookie plain-HTTP (`INTENT_COOKIE_SECURE=false`) and records
 notifications instead of sending them. The workspace app you built is served at `/workspace`.
