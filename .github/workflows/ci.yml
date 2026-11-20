@@ -117,10 +117,12 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - name: Check out intent-studio main for its route table
+      - name: Check out intent-studio for its route table
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: akira-shirase-oss/intent-studio
+          # I1 lives on the milestone branch until it merges; return to main then.
+          ref: devin/intent-studio-next
           path: intent-studio
           persist-credentials: false
       - name: Every server route in the spec; no spec path the server lacks
@@ -154,6 +156,9 @@ jobs:
         with:
           workspaces: .snippets/work/intent-studio
       - name: Run every example against the real stack
+        # INTENT_STUDIO_REF follows the milestone branch until I1 merges to main.
+        env:
+          INTENT_STUDIO_REF: devin/intent-studio-next
         run: node scripts/snippets.mjs
       - name: The server's log, if anything failed
         if: failure()

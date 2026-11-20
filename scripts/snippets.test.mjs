@@ -3,7 +3,11 @@
 // fails.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { normalise, matches, runnable, display, fences, shownBase, EXAMPLE_BASE } from './snippets.mjs';
+
+const execFileAsync = promisify(execFile);
 
 // A mapping with the band under test as `real`, as --base … would build it at run time.
 const BAND = [
@@ -31,6 +35,17 @@ test('the scheme-less form a flag takes is rewritten too', () => {
 test('the shown tenant name runs as a fresh one', () => {
 	const code = runnable('curl -X POST /v1/operator/tenants -d \'{"name":"acme-plumbing"}\'', BAND);
 	assert.match(code, /acme-plumbing-\d+/);
+});
+
+test('a run follows INTENT_STUDIO_REF while the page still clones the product', async () => {
+	const self = new URL('./snippets.mjs', import.meta.url).pathname;
+	const clone = 'git clone --depth 1 https://github.com/akira-shirase-oss/intent-studio';
+	const { stdout } = await execFileAsync(
+		process.execPath,
+		['--input-type=module', '-e', `import { runnable } from '${self}'; console.log(runnable('${clone}'));`],
+		{ env: { ...process.env, INTENT_STUDIO_REF: 'devin/intent-studio-next' } },
+	);
+	assert.equal(stdout.trim(), `${clone} --branch devin/intent-studio-next`);
 });
 
 test('an id, a session and a timestamp all normalise', () => {

@@ -97,6 +97,12 @@ const localOf = (mappings) => mappings.filter(({ shown }) => new URL(shown).host
 const SHOWN_SLUG = 'acme-plumbing';
 const RUN_SLUG = `acme-plumbing-${process.pid}`;
 
+/** The page's install step, verbatim: a reader clones the product's default branch. */
+const PRODUCT_CLONE = 'git clone --depth 1 https://github.com/akira-shirase-oss/intent-studio';
+/** A run may need another ref — CI follows the milestone branch until it merges — while the page
+ * keeps telling the reader to clone the product. */
+const PRODUCT_REF = process.env.INTENT_STUDIO_REF;
+
 /**
  * A block's code as it runs: the example domain and the shown local address become the stack's.
  * Full URLs first, then the host:port form (`INTENT_BIND=127.0.0.1:59400`), then the bare port
@@ -108,6 +114,7 @@ export const runnable = (code, mappings = MAPPINGS, slug = RUN_SLUG) => {
 	for (const entry of mappings) out = out.replaceAll(entry.shown, realOf(entry));
 	for (const entry of localOf(mappings)) out = out.replaceAll(hostPort(entry.shown), hostPort(realOf(entry)));
 	for (const entry of localOf(mappings)) out = out.replace(new RegExp(`\\b${new URL(entry.shown).port}\\b`, 'g'), new URL(realOf(entry)).port);
+	if (PRODUCT_REF) out = out.replaceAll(PRODUCT_CLONE, `${PRODUCT_CLONE} --branch ${PRODUCT_REF}`);
 	return out.replaceAll(SHOWN_SLUG, slug);
 };
 
