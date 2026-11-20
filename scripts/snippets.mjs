@@ -264,13 +264,45 @@ export function normalise(text) {
 
 const name = (shown) => (shown === EXAMPLE_BASE || shown === DEFAULT_BASE ? 'base' : 'other');
 
+/** Marker for a text that is not JSON: `null` parses, so a symbol is the failure. */
+const NOT_JSON = Symbol('not json');
+const tryParse = (text) => {
+	try {
+		return JSON.parse(text);
+	} catch {
+		return NOT_JSON;
+	}
+};
+
+/** JSON values equal: objects by key set and value — key order is not part of a body's shape —
+ * arrays element-wise (order is), everything else strictly. */
+const deepEqual = (a, b) => {
+	if (a === b) return true;
+	if (Array.isArray(a))
+		return Array.isArray(b) && a.length === b.length && a.every((value, index) => deepEqual(value, b[index]));
+	if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
+		const keys = Object.keys(a);
+		return keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key) && deepEqual(a[key], b[key]));
+	}
+	return false;
+};
+
+/** Two normalised texts equal: both parsing as JSON compares them as values (a server does not
+ * promise key order); anything else compares as text. */
+const equal = (a, b) => {
+	if (a === b) return true;
+	const [ja, jb] = [tryParse(a), tryParse(b)];
+	return ja !== NOT_JSON && jb !== NOT_JSON && deepEqual(ja, jb);
+};
+
 /**
- * Whether what ran matches the page's output block. Normally the whole normalised text must be equal. With
- * `match=lines` (a stream, whose frames a server may merge or add to), every line the page shows must be
- * among the lines that arrived, in any order: the page shows real frames, and losing one still fails.
+ * Whether what ran matches the page's output block. Normally the whole normalised text must be equal —
+ * as JSON values when both sides parse. With `match=lines` (a stream, whose frames a server may merge
+ * or add to), every line the page shows must be among the lines that arrived, in any order: the page
+ * shows real frames, and losing one still fails.
  */
 export function matches(actual, expect) {
-	if (meta(expect.info ?? '', 'match') !== 'lines') return normalise(actual) === normalise(expect.code);
+	if (meta(expect.info ?? '', 'match') !== 'lines') return equal(normalise(actual), normalise(expect.code));
 	const seen = new Set(normalise(actual).split('\n'));
 	return normalise(expect.code)
 		.split('\n')

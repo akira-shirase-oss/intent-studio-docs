@@ -48,6 +48,27 @@ test('a run follows INTENT_STUDIO_REF while the page still clones the product', 
 	assert.equal(stdout.trim(), `${clone} --branch devin/intent-studio-next`);
 });
 
+test('JSON outputs compare as values — key order is not the shape', () => {
+	// The CI failure: the server wrote the same fields in a different order.
+	const page = {
+		code: '{\n  "valid": true,\n  "brief_revision": 1,\n  "component_set": "quote-request@0",\n  "lint": "claim-lint v1",\n  "facts_checked": 0\n}',
+	};
+	assert.ok(
+		matches('{"brief_revision":1,"component_set":"quote-request@0","facts_checked":0,"lint":"claim-lint v1","valid":true}', page),
+		'reordered keys, same values',
+	);
+	assert.ok(
+		!matches('{"brief_revision":2,"component_set":"quote-request@0","facts_checked":0,"lint":"claim-lint v1","valid":true}', page),
+		'a changed value still fails — the diff report prints both normalised sides',
+	);
+	assert.ok(!matches('[1,2]', { code: '[2,1]' }), 'array order stays part of the shape');
+	assert.ok(!matches('{"a":1,"b":2}', { code: '{"a":1}' }), 'a missing key still fails');
+	assert.ok(
+		matches('migrations applied', { code: 'migrations applied' }) && !matches('migrations applied', { code: 'migrations refused' }),
+		'plain text still compares as text',
+	);
+});
+
 test('an id, a session and a timestamp all normalise', () => {
 	const a = normalise('{"id":"019a0000-0000-7000-8000-000000000000","name":"acme","created_at":"2026-11-18T10:00:00Z"}');
 	const b = normalise('{"id":"019a9999-9999-7000-8000-999999999999","name":"acme","created_at":"2026-11-18T11:00:00Z"}');
